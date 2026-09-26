@@ -366,6 +366,9 @@ journalctl -u addipv6-restore -n 50
 
 ## 体检与回滚
 
+> 下面都写成 `bash xxx.sh`。如果机器上没有 clone 仓库，把 `.sh` 换成
+> `bash <(curl -fsSL https://raw.githubusercontent.com/liu200320/sb-v6-suite/main/xxx.sh)` 即可。
+
 ### `verify.sh` — 只读体检
 
 ```bash
@@ -385,6 +388,23 @@ bash rollback.sh --prune      # 附加清理多余地址
 ```
 
 **SSH 走 IPv4 的话，IPv6 出口炸了 SSH 通常还在，救援窗口是有的** —— 但操作前还是建议先确认服务商面板的 VNC / 救援模式能用。
+
+### `links.sh` — 只看节点链接与订阅地址
+
+```bash
+bash links.sh
+```
+
+只读扫描，打印节点分享链接与各客户端订阅地址，顺带告诉你每条是从哪个文件里翻出来的。
+覆盖两种节点脚本的落盘方式：
+
+| 节点脚本 | 链接落在哪 | 形态 |
+|---|---|---|
+| fscarmen/sing-box | `/etc/sing-box/list`、`/etc/sing-box/subscribe/*` | base64 整包 / 带颜色码的导出文本 |
+| xray-cf-lite | `/etc/xray-cf-lite/state.json`、`./cf_lite_last_links.txt` | 明文 JSON / 明文快照 |
+
+> 装完发现没有链接时先跑它。链接**不会**凭空消失，只是上游脚本的存法不同 ——
+> `links.sh` 会把明文、base64 两种都解出来。
 
 ---
 
@@ -444,6 +464,7 @@ sb-v6-suite/
 ├── install.sh     主安装脚本（交互 + 非交互）
 ├── verify.sh      只读体检
 ├── rollback.sh    出口回滚
+├── links.sh       只看节点链接 / 订阅地址（只读）
 └── README.md
 ```
 

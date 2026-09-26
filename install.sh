@@ -21,6 +21,7 @@ VERSION="2.0.0"
 ADDIPV6_INSTALL_URL="https://raw.githubusercontent.com/byJoey/addipv6/main/install.sh"
 NODE_XRAY_URL="https://raw.githubusercontent.com/byJoey/xray-cf-lite/main/xray_cf_lite.sh"
 NODE_FSCARMEN_URL="https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-box.sh"
+SELF_RAW_BASE="https://raw.githubusercontent.com/liu200320/sb-v6-suite/main"
 
 STATE_DIR="/etc/sb-v6-suite"
 STATE_FILE="${STATE_DIR}/state.json"
@@ -1096,30 +1097,79 @@ verify_egress() {
 }
 
 # ---------------------------- 收集节点链接 ----------------------------------
+# 链接在机器上有三种落法，必须都认：
+#   1) 明文        —— xray-cf-lite 的 /etc/xray-cf-lite/state.json、cf_lite_local_sub.txt
+#   2) base64 整包 —— fscarmen/sing-box 的 /etc/sing-box/subscribe/v2rayn、throne、shadowrocket
+#   3) 带颜色码的导出文本 —— fscarmen 的 /etc/sing-box/list（base64 混在框线里）
+LINK_RE='(vless|vmess|trojan|ss|hysteria2|hy2|tuic|anytls|shadowtls)://[^"'"'"'[:space:]]+'
+
+strip_ansi() { sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g'; }
+grep_links() { grep -ahoE "$LINK_RE" 2>/dev/null; }
+
+links_from_file() {   # 明文文件
+  local f="$1"
+  [ -r "$f" ] || return 0
+  strip_ansi < "$f" 2>/dev/null | grep_links
+}
+
+links_from_b64() {    # 整份 base64，或文本里内嵌的长 base64 串
+  local f="$1" tok
+  [ -r "$f" ] || return 0
+  tr -d '\r\n' < "$f" 2>/dev/null | tr '_' '/' | tr '-' '+' | base64 -d 2>/dev/null | grep_links
+  strip_ansi < "$f" 2>/dev/null | grep -oE '[A-Za-z0-9+/]{100,}={0,2}' 2>/dev/null \
+    | while IFS= read -r tok; do printf '%s' "$tok" | base64 -d 2>/dev/null; done | grep_links
+}
+
 collect_links() {
+  local -a files=(
+    ./cf_lite_last_links.txt "${HOME:-/root}/cf_lite_last_links.txt" /root/cf_lite_last_links.txt
+    /etc/xray-cf-lite/state.json /etc/xray-cf-lite/cf_lite_local_sub.txt
+    /etc/sing-box/list /etc/sing-box/subscribe.txt
+    /usr/local/etc/sing-box/subscribe.txt "${STATE_DIR}/links.txt"
+  )
   local -a dirs=(
-    /usr/local/etc/xray /etc/xray-cf-lite /usr/local/etc/sing-box
-    /etc/sing-box /var/lib/sing-box /root /usr/local/etc
+    /etc/xray-cf-lite /usr/local/etc/xray
+    /etc/sing-box /usr/local/etc/sing-box /var/lib/sing-box
+    /usr/local/etc "${HOME:-/root}"
+  )
+  local -a b64=(
+    /etc/sing-box/list /usr/local/etc/sing-box/list
+    /etc/sing-box/subscribe/v2rayn /etc/sing-box/subscribe/throne
+    /etc/sing-box/subscribe/shadowrocket
+    /usr/local/etc/sing-box/subscribe/v2rayn /usr/local/etc/sing-box/subscribe/throne
   )
   local f
-  # 已生成的文件
-  for f in ./cf_lite_last_links.txt /root/cf_lite_last_links.txt \
-           "${STATE_DIR}/links.txt" /usr/local/etc/sing-box/subscribe.txt; do
-    [ -r "$f" ] && grep -hoE '(vless|vmess|trojan|ss|hysteria2|hy2|tuic|anytls|shadowtls)://[^"[:space:]]+' "$f" 2>/dev/null
-  done
-  for f in "${dirs[@]}"; do
-    [ -d "$f" ] || continue
-    grep -rhoE '(vless|vmess|trojan|ss|hysteria2|hy2|tuic|anytls|shadowtls)://[^"'"'"'[:space:]]+' "$f" 2>/dev/null
-  done | sed 's/[",]*$//' | sort -u
+  {
+    for f in "${files[@]}"; do links_from_file "$f"; done
+    for f in "${dirs[@]}"; do
+      [ -d "$f" ] || continue
+      grep -rahoE "$LINK_RE" "$f" 2>/dev/null
+    done
+    for f in "${b64[@]}"; do links_from_b64 "$f"; done
+    # subscribe 目录里其余文件（clash / sing-box 模板不含明文链接，跳过）
+    for f in /etc/sing-box/subscribe/* /usr/local/etc/sing-box/subscribe/*; do
+      [ -f "$f" ] || continue
+      case "${f##*/}" in clash|clash2|proxies|qr|sing-box|auto|auto2) continue ;; esac
+      links_from_b64 "$f"
+    done
+  } | sed 's/[",]*$//' | sort -u
 }
 
 collect_sub_url() {
-  local f
-  for f in ./cf_lite_last_links.txt /root/cf_lite_last_links.txt \
-           /usr/local/etc/sing-box/subscribe.txt "${STATE_DIR}/links.txt"; do
-    [ -r "$f" ] || continue
-    grep -hoE 'https?://[^"'"'"'[:space:]]+' "$f" 2>/dev/null
-  done | sort -u
+  local f raw filtered
+  raw="$(
+    for f in /etc/sing-box/list /etc/xray-cf-lite/state.json ./cf_lite_last_links.txt \
+             "${HOME:-/root}/cf_lite_last_links.txt" /root/cf_lite_last_links.txt \
+             /usr/local/etc/sing-box/subscribe.txt "${STATE_DIR}/links.txt"; do
+      [ -r "$f" ] || continue
+      strip_ansi < "$f" 2>/dev/null | grep -ahoE 'https?://[^"'"'"'[:space:]]+'
+    done | grep -aviE 'githubusercontent|github\.com|qrserver|cloudflare\.com|ipify|ip-api|jsdelivr|amazonaws' \
+       | sed 's/[",]*$//' | sort -u
+  )"
+  [ -n "$raw" ] || return 0
+  # 优先真正的订阅地址（带 UUID 路径或常见订阅路径），没有就退化成全部
+  filtered="$(printf '%s\n' "$raw" | grep -aiE '/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|/(auto2?|v2rayn|clash2?|sing-box|shadowrocket|throne|qr|sub)(/|$)')"
+  printf '%s\n' "${filtered:-$raw}"
 }
 
 # ---------------------------- 最终汇总 --------------------------------------
@@ -1195,15 +1245,18 @@ final_report() {
       dim "  然后选「3) 查看订阅」"
       dim "  或者看 /etc/xray-cf-lite/state.json 和运行目录下的 cf_lite_last_links.txt"
     elif [ "$OPT_NODE" = "fscarmen" ]; then
-      dim "fscarmen/sing-box 的链接一般在这些位置："
-      dim "  /etc/sing-box/ 或 /usr/local/etc/sing-box/"
-      dim "  也可以重跑脚本看它的菜单输出"
+      dim "fscarmen/sing-box 的节点信息导出在："
+      dim "  cat /etc/sing-box/list        # 各客户端订阅地址 + 单节点信息"
+      dim "它的订阅内容是 base64，明文链接这样看："
+      dim "  base64 -d /etc/sing-box/subscribe/v2rayn 2>/dev/null"
+      dim "也可以重跑它的菜单（命令：sb）看导出"
     else
       dim "没有安装节点"
     fi
     echo
     dim "也可以自己找："
     dim "  grep -rhoE '(vless|vmess|trojan|hysteria2)://[^\" ]+' /etc /usr/local/etc 2>/dev/null | sort -u"
+    dim "  base64 -d /etc/sing-box/subscribe/v2rayn 2>/dev/null   # fscarmen 的订阅是 base64"
   fi
 
   printf "\n  ${C_B}═══════════════════ 端口速查 ═══════════════════${C_N}\n\n"
@@ -1222,8 +1275,8 @@ final_report() {
   printf "    addipv6 restore                     手动恢复地址\n"
   printf "    systemctl status addipv6-restore    开机恢复服务状态\n"
   printf "    journalctl -u addipv6-restore -n 50 看恢复日志\n"
-  printf "    bash verify.sh                      一键体检\n"
-  printf "    bash rollback.sh                    回滚出口设置\n"
+  printf "    bash <(curl -fsSL %s/verify.sh)      一键体检\n" "$SELF_RAW_BASE"
+  printf "    bash <(curl -fsSL %s/rollback.sh)    回滚出口设置\n" "$SELF_RAW_BASE"
 
   printf "\n  ${C_B}═══════════════════ 注意 ═══════════════════${C_N}\n\n"
   dim "· 每次切换出口后立刻跑一次 verify.sh，确认 IPv6 没断"
