@@ -47,15 +47,20 @@ V6_ADDRS=(); V6_NATIVE=""; V6_PREFIX=""; V6_PLEN=""
 V6_ROUTED=""
 
 # NAT 与端口
+#
+# 端口模型：单一端口。服务直接监听那个端口号，公网也用同一个号访问。
+#
+# 之所以不做「内部端口 / 公网映射端口」两套值：
+# 常见的 NAT 是 1:1 同端口映射（公网 47455 → 内部 47455），
+# 服务监听 47455 就能直接被浏览器访问。搞两套值只会配错。
 NAT_DETECTED=0
 NAT_LOCAL_IP=""
 PUBLIC_IP=""
 PORT_RANGE_START=""; PORT_RANGE_END=""
-PORT_MAP_SAME=1
 PLAN_RESERVED=()
-PLAN_ADDIPV6_INT=""; PLAN_ADDIPV6_PUB=""
-PLAN_NODE_INT=(); PLAN_NODE_PUB=()
-PLAN_NGINX_INT=""; PLAN_NGINX_PUB=""
+PLAN_ADDIPV6_PORT=""
+PLAN_NODE_PORTS=()
+PLAN_NGINX_PORT=""
 NODE_PROTOCOLS=""
 
 # 节点安装结果
@@ -169,7 +174,7 @@ sb-v6-suite $VERSION — 节点 + IPv6 多地址出口 一键部署
   -y, --yes                 全程默认值，不提问
       --node=NAME           节点脚本：xray | fscarmen | none
       --addipv6-port=PORT   指定 addipv6 面板端口（NAT 机器请填映射范围内的）
-      --start-port=PORT     指定节点内部监听端口起始值
+      --start-port=PORT     节点起始端口（非 NAT 机器用；NAT 机器请用 --port-range）
       --port-range=A-B      NAT 机器映射的端口范围，如 47451-47470
       --skip-precheck       跳过 IPv6 路由验证（不推荐）
       --skip-addipv6        只装节点
@@ -510,18 +515,11 @@ plan_ports() {
     [ "$busy" = "0" ] && dim "无"
 
     echo
-    info "端口映射方式"
-    printf "    ${C_B}1${C_N}) 公网端口 = 内部端口    ${C_D}(常见，如 公网 47454 → 内部 47454)${C_N}\n"
-    printf "    ${C_B}2${C_N}) 公网端口 ≠ 内部端口    ${C_D}(如 公网 50001 → 内部 40001)${C_N}\n"
-    echo
-    local mm
-    ask "输入编号" "1" mm
-    case "$mm" in 2) PORT_MAP_SAME=0 ;; *) PORT_MAP_SAME=1 ;; esac
+    info "以上端口不可用，会自动避开"
   else
-    # 非 NAT：随便挑
+    # 非 NAT：端口自由，只登记已被占用的
     PORT_RANGE_START="${OPT_START_PORT:-40000}"
     PORT_RANGE_END=$(( PORT_RANGE_START + 500 ))
-    PORT_MAP_SAME=1
     local p
     for p in $(seq 1 9000); do
       [ "$p" = "1" ] && continue
@@ -534,7 +532,12 @@ plan_ports() {
   hr "端口分配"
   echo
   printf "  ${C_B}addipv6 面板端口${C_N}\n"
-  dim "面板要在浏览器里打开，NAT 机器上必须落在映射范围内"
+  if [ "$NAT_DETECTED" = "1" ]; then
+    dim "面板要在浏览器里打开，所以必须落在映射范围 ${PORT_RANGE_START}-${PORT_RANGE_END} 内"
+    dim "服务直接监听这个端口号，公网用同一个号访问"
+  else
+    dim "端口自由选择"
+  fi
   echo
 
   local sug
@@ -547,84 +550,86 @@ plan_ports() {
   fi
 
   local pick
-  ask "面板监听端口" "$sug" pick
+  ask "面板端口" "$sug" pick
   valid_port "$pick" || die "端口不合法：$pick"
   if port_in_use "$pick"; then die "端口 $pick 已被占用：$(port_owner "$pick")"; fi
   if [ "$NAT_DETECTED" = "1" ] && { [ "$pick" -lt "$PORT_RANGE_START" ] || [ "$pick" -gt "$PORT_RANGE_END" ]; }; then
     warn "端口 $pick 不在映射范围 ${PORT_RANGE_START}-${PORT_RANGE_END} 内"
-    dim "面板从公网很可能打不开。"
+    dim "浏览器很可能打不开这个面板。"
     ask_yn "仍要用这个端口？" n || die "已取消，请换成范围内的端口"
   fi
-  PLAN_ADDIPV6_INT="$pick"
+  PLAN_ADDIPV6_PORT="$pick"
   in_reserved "$pick" || PLAN_RESERVED+=("$pick")
-
-  if [ "$NAT_DETECTED" = "1" ] && [ "$PORT_MAP_SAME" = "0" ]; then
-    local pub
-    ask "该端口的公网映射端口" "$pick" pub
-    PLAN_ADDIPV6_PUB="$pub"
-  else
-    PLAN_ADDIPV6_PUB="$pick"
-  fi
-  ok "addipv6 面板：内部 ${PLAN_ADDIPV6_INT}  →  公网 ${PLAN_ADDIPV6_PUB}"
+  ok "addipv6 面板端口 = ${PLAN_ADDIPV6_PORT}"
 
   # ---------- 分配节点端口 ----------
   echo
   printf "  ${C_B}节点端口${C_N}\n"
-  dim "节点有「内部监听端口」和「公网映射端口」两个概念："
-  dim "  内部监听：xray / sing-box 实际监听的，不需要在映射范围内"
-  dim "  公网映射：写进 Cloudflare Origin Rules，必须在映射范围内"
+  if [ "$NAT_DETECTED" = "1" ]; then
+    dim "必须落在映射范围 ${PORT_RANGE_START}-${PORT_RANGE_END} 内"
+    dim "服务监听该端口，公网用同一个号访问 —— 不需要区分内外"
+  else
+    dim "端口自由选择"
+  fi
   echo
 
   local nproto
   ask "要开几个协议" "1" nproto
   [[ "$nproto" =~ ^[0-9]+$ ]] && [ "$nproto" -ge 1 ] && [ "$nproto" -le 6 ] || { warn "按 1 处理"; nproto=1; }
 
-  local intbase
-  if [ -n "$OPT_START_PORT" ]; then
-    intbase="$OPT_START_PORT"
+  local startp
+  if [ -n "$OPT_START_PORT" ] && [ "$NAT_DETECTED" = "0" ]; then
+    startp="$OPT_START_PORT"
   else
-    intbase="$(pick_in_range 40000 41500 2>/dev/null || echo 40000)"
+    startp="$(take_port)" || die "范围里没有空闲端口给节点用"
   fi
-  ask "内部监听端口起始值" "$intbase" intbase
-  valid_port "$intbase" || die "端口不合法：$intbase"
+  ask "节点起始端口" "$startp" startp
+  valid_port "$startp" || die "端口不合法：$startp"
 
-  local i p_int p_pub
+  local i pcur
   for ((i=0; i<nproto; i++)); do
-    p_int=$((intbase + i))
-    while port_in_use "$p_int" || in_reserved "$p_int"; do p_int=$((p_int + 1)); done
-    PLAN_RESERVED+=("$p_int")
-    PLAN_NODE_INT+=("$p_int")
-
-    if [ "$NAT_DETECTED" = "1" ]; then
-      p_pub="$(take_port)" || die "范围里没有空闲端口给节点用"
-      PLAN_NODE_PUB+=("$p_pub")
-    else
-      PLAN_NODE_PUB+=("$p_int")
+    pcur=$((startp + i))
+    while port_in_use "$pcur" || in_reserved "$pcur"; do pcur=$((pcur + 1)); done
+    if [ "$NAT_DETECTED" = "1" ] && { [ "$pcur" -lt "$PORT_RANGE_START" ] || [ "$pcur" -gt "$PORT_RANGE_END" ]; }; then
+      die "端口 $pcur 超出映射范围 ${PORT_RANGE_START}-${PORT_RANGE_END}"
     fi
+    PLAN_RESERVED+=("$pcur")
+    PLAN_NODE_PORTS+=("$pcur")
   done
 
   ok "节点端口："
   for ((i=0; i<nproto; i++)); do
-    printf "      协议 %s   内部 %-6s →  公网 %s\n" "$((i+1))" "${PLAN_NODE_INT[$i]}" "${PLAN_NODE_PUB[$i]}"
+    printf "      协议 %s   %s\n" "$((i+1))" "${PLAN_NODE_PORTS[$i]}"
   done
 
   # ---------- nginx（仅 WebSocket 协议需要）----------
+  echo
+  printf "  ${C_B}nginx 端口${C_N}  ${C_D}(只有 VLESS+WS / VMess+WS 用到，用不到可跳过)${C_N}\n"
   if [ "$NAT_DETECTED" = "1" ]; then
-    echo
-    printf "  ${C_B}nginx 端口${C_N}  ${C_D}(只有 VLESS+WS / VMess+WS 用到，用不到可跳过)${C_N}\n"
-    if ask_yn "需要预留 nginx 端口吗？" n; then
-      PLAN_NGINX_INT="$(take_port)" || warn "没有空闲端口了"
-      if [ -n "$PLAN_NGINX_INT" ]; then
-        if [ "$PORT_MAP_SAME" = "1" ]; then PLAN_NGINX_PUB="$PLAN_NGINX_INT"
-        else ask "nginx 的公网映射端口" "$PLAN_NGINX_INT" PLAN_NGINX_PUB; fi
-        ok "nginx：内部 ${PLAN_NGINX_INT}  →  公网 ${PLAN_NGINX_PUB}"
-      fi
+    dim "若需要，也要在映射范围内"
+  fi
+  if ask_yn "需要预留 nginx 端口吗？" n; then
+    local sug_n
+    if [ "$NAT_DETECTED" = "1" ]; then
+      sug_n="$(take_port)" || warn "没有空闲端口了"
     else
-      dim "跳过"
+      sug_n="$(pick_in_range 40000 41500 2>/dev/null || echo 40000)"
     fi
+    if [ -n "$sug_n" ]; then
+      local np
+      ask "nginx 端口" "$sug_n" np
+      if valid_port "$np"; then
+        PLAN_NGINX_PORT="$np"
+        in_reserved "$np" || PLAN_RESERVED+=("$np")
+        ok "nginx 端口 = ${PLAN_NGINX_PORT}"
+      else
+        warn "端口不合法，跳过 nginx"
+      fi
+    fi
+  else
+    dim "跳过"
   fi
 
-  PORT_MAP_SAME=$PORT_MAP_SAME
   echo
   ok "端口规划完成"
 }
@@ -633,18 +638,18 @@ plan_ports() {
 show_port_plan() {
   echo
   printf "  ${C_B}══════════ 端口速查（装节点时对照填） ══════════${C_N}\n"
-  printf "    addipv6 面板        内部 %-6s  公网 %s\n" "$PLAN_ADDIPV6_INT" "$PLAN_ADDIPV6_PUB"
+  printf "    addipv6 面板        %s\n" "$PLAN_ADDIPV6_PORT"
   local i
-  for ((i=0; i<${#PLAN_NODE_INT[@]}; i++)); do
-    printf "    节点协议 %-11s 内部 %-6s  公网 %s\n" "$((i+1))" "${PLAN_NODE_INT[$i]}" "${PLAN_NODE_PUB[$i]}"
+  for ((i=0; i<${#PLAN_NODE_PORTS[@]}; i++)); do
+    printf "    节点协议 %-10s %s\n" "$((i+1))" "${PLAN_NODE_PORTS[$i]}"
   done
-  [ -n "$PLAN_NGINX_INT" ] && printf "    nginx               内部 %-6s  公网 %s\n" "$PLAN_NGINX_INT" "$PLAN_NGINX_PUB"
+  [ -n "$PLAN_NGINX_PORT" ] && printf "    nginx 端口          %s\n" "$PLAN_NGINX_PORT"
+  echo
   if [ "$NAT_DETECTED" = "1" ]; then
-    printf "    ${C_D}允许范围 %s-%s   映射方式 %s${C_N}\n" \
-      "$PORT_RANGE_START" "$PORT_RANGE_END" \
-      "$([ "$PORT_MAP_SAME" = 1 ] && echo '公网=内部' || echo '公网≠内部')"
+    printf "    ${C_D}NAT 机器：服务监听端口 = 公网访问端口（同一个号）${C_N}\n"
+    printf "    ${C_D}允许范围 %s-%s${C_N}\n" "$PORT_RANGE_START" "$PORT_RANGE_END"
   else
-    printf "    ${C_D}网络环境：公网 IP，端口不受限${C_N}\n"
+    printf "    ${C_D}公网 IP：端口不受限${C_N}\n"
   fi
   printf "  ${C_B}════════════════════════════════════════════════${C_N}\n"
   echo
@@ -678,18 +683,19 @@ install_addipv6() {
     cur="$(/usr/local/bin/addipv6 version 2>/dev/null | head -1)"
     [ -n "$cur" ] && dim "$cur"
     if ! ask_yn "重新安装 / 更新？" n; then
-      OPT_ADDIPV6_PORT="${PLAN_ADDIPV6_INT}"
+      OPT_ADDIPV6_PORT="${PLAN_ADDIPV6_PORT}"
       return 0
     fi
   fi
 
-  local port="$PLAN_ADDIPV6_INT"
+  local port="$PLAN_ADDIPV6_PORT"
   [ -n "$port" ] || port="${OPT_ADDIPV6_PORT:-8688}"
 
   echo
-  printf "  面板端口已定为 ${C_G}%s${C_N}" "$port"
-  [ "$PLAN_ADDIPV6_PUB" != "$port" ] && printf "（公网映射端口 %s）" "$PLAN_ADDIPV6_PUB"
-  echo
+  printf "  面板端口已定为 ${C_G}%s${C_N}\n" "$port"
+  if [ "$NAT_DETECTED" = "1" ]; then
+    dim "NAT 机器：服务直接监听这个端口，浏览器也用同一个号访问"
+  fi
   echo
   dim "选择安装方式："
   echo
@@ -798,23 +804,26 @@ run_node_xray() {
 
   cat <<EOF
   ${C_B}xray-cf-lite 是纯交互脚本，没有配置文件模式。${C_N}
-  ${C_B}它的每一步要填什么，对应关系如下：${C_N}
+  ${C_B}它问的端口，两个框都填同一个值：${C_N}
 
 EOF
-  printf "    ${C_Y}协议${C_N}          ${C_Y}「内部监听端口」填${C_N}   ${C_Y}「外部映射端口」填${C_N}\n"
+  printf "    ${C_Y}协议${C_N}          ${C_Y}「内部监听端口」${C_N}   ${C_Y}「外部映射端口」${C_N}\n"
+  printf "    %-14s %-18s %s\n" "" "（填这个）" "（也填这个）"
   local i
-  for ((i=0; i<${#PLAN_NODE_INT[@]}; i++)); do
-    printf "    %-14s %-18s %s\n" "第 $((i+1)) 个" "${PLAN_NODE_INT[$i]}" "${PLAN_NODE_PUB[$i]}"
+  for ((i=0; i<${#PLAN_NODE_PORTS[@]}; i++)); do
+    printf "    %-14s ${C_G}%-18s${C_N} ${C_G}%s${C_N}\n" "第 $((i+1)) 个" "${PLAN_NODE_PORTS[$i]}" "${PLAN_NODE_PORTS[$i]}"
   done
-  if [ -n "$PLAN_NGINX_INT" ]; then
-    printf "    %-14s %-18s %s\n" "nginx 端口" "$PLAN_NGINX_INT" "$PLAN_NGINX_PUB"
+  if [ -n "$PLAN_NGINX_PORT" ]; then
+    printf "    %-14s ${C_G}%-18s${C_N} ${C_G}%s${C_N}\n" "nginx 端口" "$PLAN_NGINX_PORT" "$PLAN_NGINX_PORT"
   fi
   echo
   if [ "$NAT_DETECTED" = "1" ]; then
-    printf "    ${C_R}外部映射端口必须是 ${PORT_RANGE_START}-${PORT_RANGE_END} 内的值${C_N}\n"
-    dim "它会被写进 Cloudflare Origin Rules，填错节点直接连不上"
+    printf "    ${C_R}★ 两个框填一样的值，且必须是 ${PORT_RANGE_START}-${PORT_RANGE_END} 内的端口${C_N}\n"
+    dim "你的 NAT 是同端口 1:1 映射：公网 47455 → 内部 47455"
+    dim "所以服务监听哪个号，公网就用哪个号访问 —— 填成一样最省事"
+    dim "外部端口会写进 Cloudflare Origin Rules，填错节点直接连不上"
   else
-    dim "你不是 NAT 机器，内外端口填一样即可"
+    dim "你不是 NAT 机器，两个框照样填一样的值即可"
   fi
   dim "域名、CF 邮箱 + Global API Key 按你自己的信息填"
   echo
@@ -853,14 +862,15 @@ run_node_fscarmen() {
 
 EOF
   printf "    ${C_Y}它问的项${C_N}                      ${C_Y}填这个值${C_N}\n"
-  printf "    %-28s %s\n" "起始端口 START_PORT" "${PLAN_NODE_PUB[0]:-$PLAN_NODE_INT_BASE}"
-  [ -n "$PLAN_NGINX_PUB" ] && printf "    %-28s %s\n" "nginx 端口 PORT_NGINX" "$PLAN_NGINX_PUB"
-  if [ "${#PLAN_NODE_INT[@]}" -gt 1 ]; then
-    dim "（后续协议端口通常按 +1 递增：${PLAN_NODE_PUB[*]}）"
+  printf "    %-28s ${C_G}%s${C_N}\n" "起始端口 START_PORT" "${PLAN_NODE_PORTS[0]}"
+  [ -n "$PLAN_NGINX_PORT" ] && printf "    %-28s ${C_G}%s${C_N}\n" "nginx 端口 PORT_NGINX" "$PLAN_NGINX_PORT"
+  if [ "${#PLAN_NODE_PORTS[@]}" -gt 1 ]; then
+    dim "（后续协议端口通常按 +1 递增：${PLAN_NODE_PORTS[*]}）"
   fi
   echo
   if [ "$NAT_DETECTED" = "1" ]; then
     printf "    ${C_R}★ NAT 机器：起始端口必须在 ${PORT_RANGE_START}-${PORT_RANGE_END} 内${C_N}\n"
+    dim "你的 NAT 是同端口 1:1 映射，服务监听哪个号、公网就用哪个号访问"
     dim "填错的话这个节点从公网连不上"
     dim "不想操心端口的话，ARGO 选 true 走 Cloudflare 隧道，就不需要端口映射"
   else
@@ -909,13 +919,13 @@ EOF
 
   if [ "$NAT_DETECTED" = "1" ]; then
     dim "起始端口要用映射范围内的端口，否则公网连不上"
-    ask "起始端口" "${PLAN_NODE_PUB[0]}" start_port
+    ask "起始端口" "${PLAN_NODE_PORTS[0]}" start_port
     if [ "$start_port" -lt "$PORT_RANGE_START" ] 2>/dev/null || [ "$start_port" -gt "$PORT_RANGE_END" ] 2>/dev/null; then
       warn "端口 ${start_port} 不在映射范围 ${PORT_RANGE_START}-${PORT_RANGE_END} 内"
       ask_yn "仍要用？" n || die "已取消"
     fi
   else
-    ask "起始端口" "${PLAN_NODE_INT[0]}" start_port
+    ask "起始端口" "${PLAN_NODE_PORTS[0]}" start_port
   fi
 
   if [ "$NAT_DETECTED" = "1" ]; then
@@ -935,7 +945,7 @@ EOF
 LANGUAGE='${lang}'
 CHOOSE_PROTOCOLS='${protos}'
 START_PORT='${start_port}'
-PORT_NGINX='${PLAN_NGINX_PUB:-}'
+PORT_NGINX='${PLAN_NGINX_PORT:-}'
 SERVER_IP='${serverip}'
 CDN=''
 UUID_CONFIRM=''
@@ -1113,13 +1123,13 @@ final_report() {
   hr "完成 —— 汇总信息"
 
   local panel_host panel_url pass
-  if [ "$NAT_DETECTED" = "1" ] && [ -n "$PUBLIC_IP" ]; then
+  if [ -n "$PUBLIC_IP" ]; then
     panel_host="$PUBLIC_IP"
   else
-    panel_host="${PUBLIC_IP:-$NAT_LOCAL_IP}"
+    panel_host="$NAT_LOCAL_IP"
   fi
-  [ -n "$OPT_ADDIPV6_PORT" ] || OPT_ADDIPV6_PORT="${PLAN_ADDIPV6_INT:-8688}"
-  panel_url="http://${panel_host}:${PLAN_ADDIPV6_PUB:-$OPT_ADDIPV6_PORT}"
+  [ -n "$OPT_ADDIPV6_PORT" ] || OPT_ADDIPV6_PORT="${PLAN_ADDIPV6_PORT:-8688}"
+  panel_url="http://${panel_host}:${OPT_ADDIPV6_PORT}"
 
   printf "\n  ${C_B}═══════════════ IPv6 出口工具（addipv6）═══════════════${C_N}\n\n"
   if need_cmd addipv6 || [ -x /usr/local/bin/addipv6 ]; then
@@ -1131,9 +1141,7 @@ final_report() {
     else
       printf "    登录密码   ${C_Y}<未找到 /etc/addipv6/password>${C_N}\n"
     fi
-    printf "    监听端口   %s" "${OPT_ADDIPV6_PORT}"
-    [ "$PLAN_ADDIPV6_PUB" != "$OPT_ADDIPV6_PORT" ] && printf "（公网映射 %s）" "$PLAN_ADDIPV6_PUB"
-    echo
+    printf "    监听端口   %s\n" "${OPT_ADDIPV6_PORT}"
     printf "    开机恢复   %s\n" "$(systemctl is-enabled addipv6-restore 2>/dev/null || echo '未配置')"
   else
     printf "    ${C_Y}未安装${C_N}\n"
@@ -1142,7 +1150,8 @@ final_report() {
   if [ "$NAT_DETECTED" = "1" ]; then
     echo
     printf "    ${C_Y}▲ 这是 NAT 机器${C_N}\n"
-    dim "面板只能通过公网映射端口访问。如果上面地址打不开，改用 SSH 隧道："
+    dim "服务监听端口 = 公网访问端口（同端口 1:1 映射），直接用上面的地址即可"
+    dim "万一打不开，可以走 SSH 隧道："
     dim "  ssh -L ${OPT_ADDIPV6_PORT}:127.0.0.1:${OPT_ADDIPV6_PORT} root@${PUBLIC_IP:-<公网IP>}"
     dim "  然后浏览器开 http://127.0.0.1:${OPT_ADDIPV6_PORT}"
   fi
@@ -1194,13 +1203,14 @@ final_report() {
   fi
 
   printf "\n  ${C_B}═══════════════════ 端口速查 ═══════════════════${C_N}\n\n"
-  printf "    addipv6 面板   %s\n" "${PLAN_ADDIPV6_PUB:-$OPT_ADDIPV6_PORT}"
+  printf "    addipv6 面板   %s\n" "${PLAN_ADDIPV6_PORT:-$OPT_ADDIPV6_PORT}"
   local i
-  for ((i=0; i<${#PLAN_NODE_INT[@]}; i++)); do
-    printf "    节点协议 %-6s 内部 %-6s 公网 %s\n" "$((i+1))" "${PLAN_NODE_INT[$i]}" "${PLAN_NODE_PUB[$i]}"
+  for ((i=0; i<${#PLAN_NODE_PORTS[@]}; i++)); do
+    printf "    节点协议 %-6s %s\n" "$((i+1))" "${PLAN_NODE_PORTS[$i]}"
   done
+  [ -n "$PLAN_NGINX_PORT" ] && printf "    nginx 端口     %s\n" "$PLAN_NGINX_PORT"
   if [ "$NAT_DETECTED" = "1" ]; then
-    printf "    %s允许范围 %s-%s${C_N}\n" "$C_D" "$PORT_RANGE_START" "$PORT_RANGE_END"
+    printf "    %s允许范围 %s-%s（监听号 = 访问号）${C_N}\n" "$C_D" "$PORT_RANGE_START" "$PORT_RANGE_END"
   fi
 
   printf "\n  ${C_B}═══════════════════ 常用命令 ═══════════════════${C_N}\n\n"
@@ -1221,9 +1231,8 @@ final_report() {
 # ---------------------------- 状态 ------------------------------------------
 write_state() {
   mkdir -p "$STATE_DIR"
-  local pub_ports int_ports
-  pub_ports="$(IFS=,; echo "${PLAN_NODE_PUB[*]:-}")"
-  int_ports="$(IFS=,; echo "${PLAN_NODE_INT[*]:-}")"
+  local node_ports
+  node_ports="$(IFS=,; echo "${PLAN_NODE_PORTS[*]:-}")"
   cat > "$STATE_FILE" <<EOF
 {
   "version": "$VERSION",
@@ -1233,12 +1242,10 @@ write_state() {
   "nat": ${NAT_DETECTED},
   "public_ip": "${PUBLIC_IP}",
   "port_range": "${PORT_RANGE_START}-${PORT_RANGE_END}",
-  "port_map_same": ${PORT_MAP_SAME},
-  "addipv6_port_int": ${PLAN_ADDIPV6_INT:-0},
-  "addipv6_port_pub": ${PLAN_ADDIPV6_PUB:-0},
+  "addipv6_port": ${PLAN_ADDIPV6_PORT:-0},
   "node": "${OPT_NODE}",
-  "node_int_ports": "${int_ports}",
-  "node_pub_ports": "${pub_ports}",
+  "node_ports": "${node_ports}",
+  "nginx_port": ${PLAN_NGINX_PORT:-0},
   "v6_iface": "${V6_IFACE}",
   "v6_gateway": "${V6_GW}",
   "v6_prefix": "${V6_PREFIX}",

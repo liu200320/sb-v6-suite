@@ -46,7 +46,8 @@ if [ -r "$STATE_FILE" ]; then
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
-    for k in ("version","installed_at","os","arch","addipv6_port","start_port","node",
+    for k in ("version","installed_at","os","arch","nat","public_ip","addipv6_port",
+              "node","node_ports","nginx_port","port_range",
               "v6_iface","v6_gateway","v6_prefix","v6_native","v6_routed"):
         if k in d and d[k] not in (None, ""):
             print("    %-14s %s" % (k + ":", d[k]))
