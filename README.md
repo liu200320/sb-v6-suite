@@ -3,7 +3,18 @@
 **节点 + IPv6 多地址出口 一键部署**
 
 把 [addipv6](https://github.com/byJoey/addipv6) 和节点脚本串成一套可交互安装的部署流程，
-并补上原项目没有的 **IPv6 路由预检**、**开机恢复服务**、**一键体检** 和 **回滚**。
+并补上原项目没有的 **IPv6 路由预检**、**NAT 端口规划**、**开机恢复服务**、**一键体检** 和 **回滚**。
+
+## 一键安装
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/liu200320/sb-v6-suite/main/install.sh)
+```
+
+> **必须用 `bash <(curl ...)` 这种方式。**
+> 用 `curl ... | bash` 会让 stdin 变成脚本自身内容，所有交互都会失效（详见下文）。
+
+装完会输出：**节点分享链接** + **addipv6 面板地址** + **登录密码** + **端口速查表**。
 
 ---
 
@@ -72,7 +83,7 @@ ping6 -c 3 -I <随机地址> 2606:4700:4700::1111
 ## 快速开始
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/<你的用户名>/sb-v6-suite/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/liu200320/sb-v6-suite/main/install.sh)
 ```
 
 ### 交互流程
@@ -205,10 +216,10 @@ fscarmen/sing-box 的官方交互流程会被完整保留。
 
 ```bash
 # ✅ 正确 —— stdin 是终端，交互正常
-bash <(curl -fsSL https://raw.githubusercontent.com/<你>/sb-v6-suite/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/liu200320/sb-v6-suite/main/install.sh)
 
 # ❌ 错误 —— stdin 变成脚本自身内容，所有 read 都会失败
-curl -fsSL https://raw.githubusercontent.com/<你>/sb-v6-suite/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/liu200320/sb-v6-suite/main/install.sh | bash
 ```
 
 第二种写法下，子进程的 stdin 是管道，**任何 `read` 都读不到你的输入**，
