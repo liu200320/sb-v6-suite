@@ -100,36 +100,40 @@ detect_tty() {
   return 0
 }
 
+# 注意：tty_read / ask / ask_yn 之间靠 bash 的动态作用域回填变量。
+# printf -v 会写到「最近的同名变量」，所以内部临时变量绝不能和传入的目标变量名重名，
+# 否则会写回自己的局部变量，调用方永远拿到空值。
+# 约定：内部临时变量统一用 __answer / __line，目标变量名由调用方传入。
 tty_read() {
-  local __var="$1" prompt="$2" ans=""
+  local __target="$1" __prompt="$2" __line=""
   [ "$TTY_AVAILABLE" = "1" ] || return 1
-  read -r -p "$prompt" ans < /dev/tty || return 1
-  printf -v "$__var" '%s' "$ans"
+  read -r -p "$__prompt" __line < /dev/tty || return 1
+  printf -v "$__target" '%s' "$__line"
   return 0
 }
 
 ask() {
-  # $1=提示 $2=默认 $3=结果变量
-  local prompt="$1" def="$2" __var="$3" ans=""
-  if [ "$OPT_YES" = "1" ]; then printf -v "$__var" '%s' "$def"; return 0; fi
-  if tty_read ans "  ${prompt} [${def}]: "; then
-    [ -z "$ans" ] && ans="$def"
-    printf -v "$__var" '%s' "$ans"
+  # $1=提示 $2=默认 $3=结果变量名
+  local __prompt="$1" __def="$2" __target="$3" __answer=""
+  if [ "$OPT_YES" = "1" ]; then printf -v "$__target" '%s' "$__def"; return 0; fi
+  if tty_read __answer "  ${__prompt} [${__def}]: "; then
+    [ -z "$__answer" ] && __answer="$__def"
+    printf -v "$__target" '%s' "$__answer"
     return 0
   fi
-  printf "  ${prompt} [${def}]: %s ${C_D}(无终端，取默认)${C_N}\n" "$def"
-  printf -v "$__var" '%s' "$def"
+  printf "  ${__prompt} [${__def}]: %s ${C_D}(无终端，取默认)${C_N}\n" "$__def"
+  printf -v "$__target" '%s' "$__def"
 }
 
 ask_yn() {
-  local prompt="$1" def="$2" ans=""
-  if [ "$OPT_YES" = "1" ]; then [ "$def" = "y" ] && return 0 || return 1; fi
-  if tty_read ans "  ${prompt} [$([ "$def" = y ] && echo 'Y/n' || echo 'y/N')]: "; then
-    ans="${ans:-$def}"
-    case "$ans" in [Yy]*) return 0 ;; *) return 1 ;; esac
+  local __prompt="$1" __def="$2" __answer=""
+  if [ "$OPT_YES" = "1" ]; then [ "$__def" = "y" ] && return 0 || return 1; fi
+  if tty_read __answer "  ${__prompt} [$([ "$__def" = y ] && echo 'Y/n' || echo 'y/N')]: "; then
+    __answer="${__answer:-$__def}"
+    case "$__answer" in [Yy]*) return 0 ;; *) return 1 ;; esac
   fi
-  printf "  ${prompt} ${C_D}(无终端，取默认 ${def})${C_N}\n"
-  [ "$def" = "y" ] && return 0 || return 1
+  printf "  ${__prompt} ${C_D}(无终端，取默认 ${__def})${C_N}\n"
+  [ "$__def" = "y" ] && return 0 || return 1
 }
 
 run_upstream() {
